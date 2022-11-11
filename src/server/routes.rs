@@ -1,4 +1,4 @@
-use std::convert::Infallible;
+/* use std::convert::Infallible;
 
 use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
 use async_graphql::{Request, Schema};
@@ -43,3 +43,4 @@ pub fn make_routes(
     // Wire together all the routes.
     health.or(graphql_handler).or(graphql_playground).boxed()
 }
+ */
