@@ -10,7 +10,7 @@ async fn main() {
 	// initialize tracing
 	tracing_subscriber::fmt::init();
 	let db = database::Database::new();
-	let result = db.query("GET ALL FROM test WHERE family = Ana");
+	let result = db.query("GET family scene FROM test");
 	println!("{:?}", result);
 
 	/*
