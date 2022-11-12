@@ -2,53 +2,6 @@ use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 
-/* pub struct QueryStateMachine();
-
-
-
-pub trait State {
-	pub fn execute()
-}
-
- */
-
-pub struct FromArgument<'l> {
-	pub file: &'l str,
-}
-
-impl<'l> FromArgument<'l> {
-	pub fn from_str(inp: &'l str) -> Self {
-		Self { file: inp }
-	}
-}
-
-pub struct GetArgument<'l> {
-	pub op: &'l str,
-	pub file: Option<&'l str>,
-	pub field: Option<&'l str>,
-	pub all: bool,
-}
-
-impl<'l> GetArgument<'l> {
-	pub fn from_str(inp: &'l str) -> Self {
-		let op = inp.clone();
-		let all = inp == "ALL";
-
-		// Get the file name if it is there
-		let file = match inp.find(':') {
-			Some(pos) => Some(&inp[0..pos]),
-			_ => None,
-		};
-
-		let field = match inp.find(':') {
-			Some(pos) => Some(&inp[pos..]),
-			_ => Some(inp),
-		};
-
-		Self { op, file, field, all }
-	}
-}
-
 pub struct Database {
 	pub data: HashMap<String, serde_json::Value>,
 }
@@ -60,17 +13,29 @@ impl Database {
 			{
 				"family": "Ana",
 				"name": "A",
-				"scene": "T"
+				"scene": "T",
+				"car": {
+					"name": "Tesla",
+					"speed": "1000"
+				}
 			},
 			{
 				"family": "Banana",
 				"name": "B",
-				"scene": "Y"
+				"scene": "Y",
+				"car": {
+					"name": "Tuscon",
+					"speed": "2000"
+				}
 			},
 			{
 				"family": "Ana",
 				"name": "C",
-				"scene": "Z"
+				"scene": "Z",
+				"car": {
+					"name": "Jaguar",
+					"speed": "3000"
+				}
 			}
 		]);
 
@@ -79,143 +44,208 @@ impl Database {
 	}
 
 	pub fn query(&self, command: &str) -> serde_json::Value {
-		// Lets start with a simple algorithm that only understands GET and FROM
-		// First let's tokenize all words in the command
-		let mut command = command.trim();
-		let mut tokens: Vec<&str> = command.split(' ').collect();
+		// Tokenize
+		let (get_statement, from_statement) = tokenize_input(command);
 
-		// Now let's separate our keywords and their arguments
-		let mut get_command: Vec<&str> = Vec::new();
-		let mut from_command: Vec<&str> = Vec::new();
+		// Parse GET and FROM statements
+		let mut from_args = parse_from_statement(&from_statement);
+		let mut get_args = parse_get_statement(&get_statement, Some(from_args[0].file));
 
-		let mut curret_comamnd = &mut get_command;
-		for token in tokens {
-			match token {
-				"GET" => curret_comamnd = &mut get_command,
-				"FROM" => curret_comamnd = &mut from_command,
-				_ => (),
-			};
+		// Check that we have some data there
+		assert!(!get_args.is_empty());
+		assert_eq!(from_args.len(), 1);
 
-			if token == "GET" || token == "FROM" {
-				continue
-			}
+		// Prepare for query
+		let query_data = parse_args(get_args);
 
-			curret_comamnd.push(token);
+		for (file, fields) in query_data {
+			// Read file
+			let file_as_json = self.data.get(file).unwrap();
+			let file_as_json = file_as_json.as_array().unwrap();
+
+			// Extract the fields that we need
+			let res = extract_json_fields(file_as_json, &fields);
+			return Value::Array(res)
 		}
 
-		// If GET or FROM are empty return
-		if get_command.is_empty() || from_command.is_empty() {
-			todo!()
+		todo!()
+	}
+}
+
+pub fn tokenize_input(inp: &str) -> (Vec<&str>, Vec<&str>) {
+	// Lets start with a simple algorithm that only understands GET and FROM
+	// First let's tokenize all words in the command
+	// Now let's separate our keywords and their arguments
+
+	let mut command = inp.trim();
+	let mut tokens: Vec<&str> = command.split(' ').collect();
+
+	// Now let's separate our keywords and their arguments
+	let mut get_statement: Vec<&str> = Vec::new();
+	let mut from_statement: Vec<&str> = Vec::new();
+
+	let mut curret_statement = &mut get_statement;
+	for token in tokens {
+		match token {
+			"GET" => curret_statement = &mut get_statement,
+			"FROM" => curret_statement = &mut from_statement,
+			_ => (),
+		};
+
+		if token == "GET" || token == "FROM" {
+			continue
 		}
 
-		// Parse all GET Arguments
-		let mut get_arguments: Vec<GetArgument> =
-			get_command.iter().map(|x| GetArgument::from_str(*x)).collect();
+		curret_statement.push(token);
+	}
 
-		// Parse all FROM Arguments
-		let from_arguments: Vec<FromArgument> =
-			from_command.iter().map(|x| FromArgument::from_str(*x)).collect();
+	(get_statement, from_statement)
+}
 
-		// Let's just deal with 1 FROM
-		assert_eq!(from_arguments.len(), 1);
+#[derive(Debug, Clone)]
+pub struct GetArgument<'l> {
+	pub op: &'l str,
+	pub file: &'l str,
+	pub field: EntryField<'l>,
+	pub field_name: &'l str,
+}
 
-		// Since FROM is just one then we can apply this from to all get arguments
-		get_arguments.iter_mut().for_each(|x| {
-			x.file = Some(from_arguments[0].file);
-		});
+impl<'l> GetArgument<'l> {
+	pub fn from_str(inp: &'l str, default_file: Option<&'l str>) -> Self {
+		let op = inp.clone();
+		let all = inp == "ALL";
+		let mut field_name = None;
 
-		// If we have an ALL keyword then we can ignore all the other arguments
-		let mut all = get_arguments.iter().find(|x| x.all).is_some();
+		// Define file name
 
-		let mut file_to_field_map = HashMap::<&str, Vec<&str>>::new();
-		for from_argument in from_arguments {
-			let file = from_argument.file;
+		// Get the file name if it is there
+		let pos = inp.find(':');
+		let mut file = match pos {
+			Some(pos) => Some(&inp[0..pos]),
+			_ => None,
+		};
 
-			if all {
-				file_to_field_map.insert(file, vec![]);
-				break
-			}
-
-			let valid_args = get_arguments.iter().filter(|x| x.file == Some(file));
-			for arg in valid_args {
-				let field = arg.field.unwrap();
-				if let Some(x) = file_to_field_map.get_mut(file) {
-					x.push(field);
-				} else {
-					file_to_field_map.insert(file, vec![field]);
-				}
-			}
+		if file.is_some() && default_file.is_some() {
+			assert!(file == default_file);
 		}
 
-		let mut file_to_json_output = HashMap::<&str, serde_json::Value>::new();
-		for (file, fields) in file_to_field_map {
-			let read_file = self.data.get(file).unwrap();
+		if file.is_none() {
+			assert!(default_file.is_some());
+			file = default_file;
+		}
+		let file = file.unwrap();
 
-			if fields.is_empty() {
-				file_to_json_output.insert(file, read_file.clone());
-				continue
-			}
+		// Parse field
+		let field = if let Some(pos) = pos {
+			field_name = Some(&inp[pos + 1..]);
+			EntryField::from_str(&inp[pos + 1..])
+		} else {
+			field_name = Some(&inp);
+			EntryField::from_str(inp)
+		};
 
-			let entires = read_file.as_array().unwrap();
-			let mut new_entires: Vec<Value> = Vec::new();
-			for entry in entires {
-				let old_obj = entry.as_object().unwrap();
-				let mut new_obj: Map<String, Value> = Map::new();
+		let field_name = field_name.unwrap();
 
-				for field in fields.iter() {
-					let field = field.to_string();
-					new_obj.insert(field.clone(), old_obj.get(&field).unwrap().clone());
-				}
+		Self { op, file, field, field_name }
+	}
+}
 
-				new_entires.push(Value::Object(new_obj));
-			}
+#[derive(Debug, Clone)]
+pub enum EntryField<'l> {
+	Normal(&'l str),
+	Nested((&'l str, Box<EntryField<'l>>)),
+	All,
+}
 
-			file_to_json_output.insert(file, Value::Array(new_entires));
+impl<'l> EntryField<'l> {
+	pub fn from_str(inp: &'l str) -> Self {
+		if inp == "ALL" {
+			return Self::All
 		}
 
-		// Let's see what kind of OP we have for GET
+		let dot_pos = inp.find('.');
+		if dot_pos.is_none() {
+			return Self::Normal(inp)
+		}
 
-		file_to_json_output.get("test").unwrap().clone()
+		let dot_pos = dot_pos.unwrap();
+		let parent: &str = &inp[0..dot_pos];
+		let child: &str = &inp[dot_pos + 1..];
 
-		/* 		let mut multi_file_mode = false;
+		Self::Nested((parent, Box::new(EntryField::from_str(child))))
+	}
+}
 
-		// Check if we are dealing with one file or multiple files
-		let mut from_token_pos = tokens.iter().position(|x| **x == "FROM").unwrap();
-		let mut next_keyword_pos = tokens.iter()
+pub fn parse_get_statement<'l>(
+	statement: &[&'l str],
+	file: Option<&'l str>,
+) -> Vec<GetArgument<'l>> {
+	statement.iter().map(|x| GetArgument::from_str(*x, file)).collect()
+}
 
-		let token = tokens.pop().unwrap();
-		assert_eq!(token, "GET");
+#[derive(Debug, Clone, Copy)]
+pub struct FromArgument<'l> {
+	pub file: &'l str,
+}
 
-		let token = tokens.pop().unwrap();
-		assert_eq!(token, "ALL");
+impl<'l> FromArgument<'l> {
+	pub fn from_str(inp: &'l str) -> Self {
+		Self { file: inp }
+	}
+}
 
-		let token = tokens.pop().unwrap();
-		assert_eq!(token, "FROM");
+pub fn parse_from_statement<'l>(statement: &[&'l str]) -> Vec<FromArgument<'l>> {
+	statement.iter().map(|x| FromArgument::from_str(*x)).collect()
+}
 
-		let file_name = tokens.pop().unwrap();
-		let db_value = self.data.get(file_name).unwrap();
-		let db_value = db_value.as_array().unwrap();
+pub fn parse_args<'l>(args: Vec<GetArgument<'l>>) -> HashMap<&'l str, Vec<GetArgument<'l>>> {
+	let mut map: HashMap<&'l str, Vec<GetArgument<'l>>> = HashMap::new();
 
-		let token = tokens.pop().unwrap();
-		assert_eq!(token, "WHERE");
+	for arg in args {
+		if let Some(entries) = map.get_mut(arg.file) {
+			entries.push(arg.clone());
+		} else {
+			map.insert(arg.file, vec![arg.clone()]);
+		}
+	}
 
-		let field = tokens.pop().unwrap();
+	map
+}
 
-		let token = tokens.pop().unwrap();
-		assert_eq!(token, "=");
+pub fn extract_json_fields<'l>(
+	inp: &[serde_json::Value],
+	args: &[GetArgument<'l>],
+) -> Vec<serde_json::Value> {
+	let mut result = Vec::new();
 
-		let expected_value = tokens.pop().unwrap();
+	for inp in inp {
+		let mut new_obj: Map<String, Value> = Map::new();
+		for arg in args {
+			let extracted_field = extract_json_value(inp, &arg.field);
 
-		let all_items: Vec<serde_json::Value> = db_value
-			.iter()
-			.filter(|x| {
-				let value = x.as_object().unwrap();
-				let field_value = value.get(field).unwrap();
-				field_value.as_str().unwrap() == expected_value
-			})
-			.map(|x| x.clone())
-			.collect();
+			// Get file name + file name
+			let mut full_field_name = std::format!("{}:{}", arg.file, arg.field_name);
 
-		serde_json::Value::Array(all_items) */
+			new_obj.insert(full_field_name, extracted_field);
+		}
+		result.push(Value::Object(new_obj));
+	}
+
+	result
+}
+
+pub fn extract_json_value<'l>(
+	inp: &serde_json::Value,
+	field: &EntryField<'l>,
+) -> serde_json::Value {
+	let inp = inp.as_object().unwrap();
+
+	match field {
+		EntryField::Normal(x) => inp.get(*x).unwrap().clone(),
+		EntryField::Nested((x, y)) => {
+			let parent = inp.get(*x).unwrap();
+			extract_json_value(parent, y)
+		},
+		EntryField::All => todo!(),
 	}
 }
